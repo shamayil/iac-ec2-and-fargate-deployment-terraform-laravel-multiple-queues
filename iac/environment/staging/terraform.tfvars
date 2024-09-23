@@ -1,0 +1,14 @@
+region           = "ap-southeast-1"
+project          = "redis-cache"
+environment      = "staging"
+service_name     = "service"
+hostzone         = "iposg.co.uk"
+cpu              = 256
+memory           = 512
+desired_count    = 1
+host_header      = "redis-cache.iposg.co.uk" # ALB Value
+subdomain_name   = "redis-cache" # Route53 Value
+#nginx_image_tag      = "redis-cache-staging-service:nginx-38a140d"
+#phpapp_image_tag     = "redis-cache-staging-service:php-38a140d"
+database_secrets = "iposg-staging"
+common_secrets   = "iposg-staging"
