@@ -2,15 +2,15 @@
 FROM php:8.2.7-fpm-buster
 
 # Set environment variables
-ENV PM_MAX_CHILDREN=6 \
-    PM_START_SERVERS=3 \
-    PM_MIN_SPARE_SERVERS=2 \
-    PM_MAX_SPARE_SERVERS=4 \
+ENV PM_MAX_CHILDREN=40 \
+    PM_START_SERVERS=8 \
+    PM_MIN_SPARE_SERVERS=4 \
+    PM_MAX_SPARE_SERVERS=10 \
     MAX_EXECUTION_TIME=1200 \
     PM_MAX_REQUEST=1200 \
     TERMINATE_TIME_OUT=1200 \
-    MEMORY_LIMIT=512M \
-    UPLOAD_MAX_SIZE=64M \
+    MEMORY_LIMIT=4096M \
+    UPLOAD_MAX_SIZE=512M \
     TZ=Europe/London
 
 # Set timezone
@@ -126,6 +126,18 @@ RUN pecl install xdebug \
         echo "xdebug.client_port=9003"; \
         echo "xdebug.log=/tmp/xdebug.log"; \
     } > /usr/local/etc/php/conf-docker/xdebug.ini
+
+# php.ini file Configurations changes
+RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini" \
+    && sed -i "s#^max_execution_time =.*#max_execution_time = ${MAX_EXECUTION_TIME}#g" "$PHP_INI_DIR/php.ini" \
+    && sed -i "s#^memory_limit =.*#memory_limit = ${MEMORY_LIMIT}#g" "$PHP_INI_DIR/php.ini" \
+    && sed -i "s#^upload_max_filesize =.*#upload_max_filesize = ${UPLOAD_MAX_SIZE}#g" "$PHP_INI_DIR/php.ini" \
+    && sed -i "s#^max_input_time =.*#max_input_time = ${TERMINATE_TIME_OUT}#g" "$PHP_INI_DIR/php.ini" \
+    && sed -i "/^; max_children =/a pm.max_children = ${PM_MAX_CHILDREN}" "$PHP_INI_DIR/php.ini" \
+    && sed -i "/^; start_servers =/a pm.start_servers = ${PM_START_SERVERS}" "$PHP_INI_DIR/php.ini" \
+    && sed -i "/^; min_spare_servers =/a pm.min_spare_servers = ${PM_MIN_SPARE_SERVERS}" "$PHP_INI_DIR/php.ini" \
+    && sed -i "/^; max_spare_servers =/a pm.max_spare_servers = ${PM_MAX_SPARE_SERVERS}" "$PHP_INI_DIR/php.ini" \
+    && sed -i "/^; request_terminate_timeout =/a request_terminate_timeout = ${TERMINATE_TIME_OUT}" "$PHP_INI_DIR/php.ini"
 
 # Set up working directory
 WORKDIR /var/www/html

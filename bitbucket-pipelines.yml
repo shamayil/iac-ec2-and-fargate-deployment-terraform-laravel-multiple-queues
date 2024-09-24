@@ -1,0 +1,140 @@
+# Only use spaces to indent your .yml configuration.
+# -----
+# You can specify a custom docker image from Docker Hub as your build environment.
+pipelines:
+  branches:
+    staging:
+      - step:
+          name: Login to aws staging ecr
+          image: amazon/aws-cli
+          services:
+            - docker
+          script:
+            # define aws cli environment variables
+            - export AWS_ACCESS_KEY_ID=$STAG_AWS_ACCESS_KEY_ID
+            - export AWS_SECRET_ACCESS_KEY=$STAG_AWS_SECRET_ACCESS_KEY
+            - export AWS_DEFAULT_REGION=$STAG_AWS_DEFAULT_REGION
+            - export REGISTRY_URL=$STAG_REGISTRY_URL
+            # aws login
+            - aws ecr get-login-password | docker login --username AWS --password-stdin $REGISTRY_URL
+            - cp /root/.docker/config.json .
+          artifacts:
+            - config.json
+      - step:
+          name: Build & Push nginx proxy image
+          image: amazon/aws-cli
+          services:
+            - docker
+          script:
+            - export REGISTRY_URL=$STAG_REGISTRY_URL
+            - BITBUCKET_COMMIT_SHORT="${BITBUCKET_COMMIT::7}"
+            - mkdir /root/.docker && mv config.json /root/.docker/
+            - docker build -t $REGISTRY_URL/${STAGING_TASK_NGINX_PROXY}-${BITBUCKET_COMMIT_SHORT} -f proxy/nginx/Dockerfile .
+            - docker push $REGISTRY_URL/${STAGING_TASK_NGINX_PROXY}-${BITBUCKET_COMMIT_SHORT}
+      - step:
+          name: Build & Push php app image
+          image: amazon/aws-cli
+          services:
+            - docker
+          script:
+            - export REGISTRY_URL=$STAG_REGISTRY_URL
+            - BITBUCKET_COMMIT_SHORT="${BITBUCKET_COMMIT::7}"
+            - mkdir /root/.docker && mv config.json /root/.docker/
+            - docker build -t $REGISTRY_URL/${STAGING_TASK_PHP_APP}-${BITBUCKET_COMMIT_SHORT} -f proxy/php/Dockerfile .
+            - docker push $REGISTRY_URL/${STAGING_TASK_PHP_APP}-${BITBUCKET_COMMIT_SHORT}
+      - step:
+          name: Deploy to ECS Cluster
+          image: amazon/aws-cli
+          script:
+            # define aws cli environment variables
+            - export AWS_ACCESS_KEY_ID=$STAG_AWS_ACCESS_KEY_ID
+            - export AWS_SECRET_ACCESS_KEY=$STAG_AWS_SECRET_ACCESS_KEY
+            - export AWS_DEFAULT_REGION=$STAG_AWS_DEFAULT_REGION
+            - export REGISTRY_URL=$STAG_REGISTRY_URL
+            - BITBUCKET_COMMIT_SHORT="${BITBUCKET_COMMIT::7}"
+            # install tools
+            - yum install jq -y
+            # register new task definition
+            - TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition $STAGING_TASK_FAMILY)
+            - TASK_DEFINITION=$(echo $TASK_DEFINITION | jq --arg IMAGE "$REGISTRY_URL/${STAGING_TASK_PHP_APP}-${BITBUCKET_COMMIT_SHORT}" '.taskDefinition.containerDefinitions[0].image = $IMAGE')
+            - echo $(echo $TASK_DEFINITION | jq --arg IMAGE "$REGISTRY_URL/${STAGING_TASK_NGINX_PROXY}-${BITBUCKET_COMMIT_SHORT}" '.taskDefinition.containerDefinitions[1].image = $IMAGE | .taskDefinition | del(.taskDefinitionArn,.revision,.status,.revision,.requiresAttributes,.compatibilities,.registeredBy,.registeredAt)') > task-definition.json
+            - TASK_DEFINITION_VERSION=$(aws ecs register-task-definition --region $AWS_DEFAULT_REGION --family $STAGING_TASK_FAMILY --cli-input-json file://task-definition.json | grep revision | cut -d ":" -f2 | cut -d "," -f1 | tr -d ' ')
+            # update ecs services
+            - aws ecs update-service --cluster $STAGING_ECS_CLUSTER --service $STAGING_ECS_SERVICE --task-definition $STAGING_TASK_FAMILY:$TASK_DEFINITION_VERSION --force-new-deployment > /dev/null
+    master:
+      - step:
+          name: Build and Push NGINX Image to Production ECR
+          image: amazonlinux:latest
+          services:
+            - docker
+          script:
+            - yum update -y
+            - yum install -y curl-minimal python3 python3-pip tar gzip
+            - pip3 install awscli --upgrade
+            - BITBUCKET_COMMIT_SHORT=$(echo "${BITBUCKET_COMMIT}" | cut -c 1-7)
+            - export AWS_ACCESS_KEY_ID=$PROD_AWS_ACCESS_KEY_ID
+            - export AWS_SECRET_ACCESS_KEY=$PROD_AWS_SECRET_ACCESS_KEY
+            - export AWS_REGION=$PROD_AWS_DEFAULT_REGION
+            - export AWS_ACCOUNT_ID=$PROD_AWS_ACC
+            - export REPOSITORY_NAME="${PRODUCTION_ECR}"
+            - export IMAGE_TAG="nginx-${BITBUCKET_COMMIT_SHORT}"
+            - ECR_URL="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_URL
+            - docker build -f proxy/nginx/Dockerfile -t $ECR_URL/$REPOSITORY_NAME:$IMAGE_TAG .
+            - docker push $ECR_URL/$REPOSITORY_NAME:$IMAGE_TAG
+      - step:
+          name: Build and Push PHP Image to Production ECR
+          image: amazonlinux:latest
+          services:
+            - docker
+          script:
+            - yum update -y
+            - yum install -y curl-minimal python3 python3-pip tar gzip git
+            - pip3 install awscli --upgrade
+            - BITBUCKET_COMMIT_SHORT=$(echo "${BITBUCKET_COMMIT}" | cut -c 1-7)
+            - export AWS_ACCESS_KEY_ID=$PROD_AWS_ACCESS_KEY_ID
+            - export AWS_SECRET_ACCESS_KEY=$PROD_AWS_SECRET_ACCESS_KEY
+            - export AWS_REGION=$PROD_AWS_DEFAULT_REGION
+            - export AWS_ACCOUNT_ID=$PROD_AWS_ACC
+            - export REPOSITORY_NAME="${PRODUCTION_ECR}"
+            - export IMAGE_TAG="php-${BITBUCKET_COMMIT_SHORT}"
+            - ECR_URL="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_URL
+            - docker build -f proxy/php/Dockerfile -t $ECR_URL/$REPOSITORY_NAME:$IMAGE_TAG .
+            - docker push $ECR_URL/$REPOSITORY_NAME:$IMAGE_TAG
+      - step:
+          name: Terraform plan on production
+          image: hashicorp/terraform:latest
+          services:
+            - docker
+          script:
+            - export AWS_ACCESS_KEY_ID=$PROD_AWS_ACCESS_KEY_ID
+            - export AWS_SECRET_ACCESS_KEY=$PROD_AWS_SECRET_ACCESS_KEY
+            - export AWS_DEFAULT_REGION=$PROD_AWS_DEFAULT_REGION
+            - BITBUCKET_COMMIT_SHORT=$(echo "${BITBUCKET_COMMIT}" | cut -c 1-7)
+            - export REPOSITORY_NAME="${PRODUCTION_ECR}"
+            - NGINX_TAG="${REPOSITORY_NAME}:nginx-${BITBUCKET_COMMIT_SHORT}"
+            - PHP_TAG="${REPOSITORY_NAME}:php-${BITBUCKET_COMMIT_SHORT}"
+            - VAR_FILE="environment/production/terraform.tfvars"
+            - HCL_FILE="environment/production/backend.hcl"
+            - cd iac
+            - terraform init -backend-config $HCL_FILE
+            - terraform plan -var=nginx_image_tag=$NGINX_TAG -var=phpapp_image_tag=$PHP_TAG -var-file=$VAR_FILE
+      - step:
+          name: Terraform apply to production
+          image: hashicorp/terraform:latest
+          services:
+            - docker
+          script:
+            - export AWS_ACCESS_KEY_ID=$PROD_AWS_ACCESS_KEY_ID
+            - export AWS_SECRET_ACCESS_KEY=$PROD_AWS_SECRET_ACCESS_KEY
+            - export AWS_DEFAULT_REGION=$PROD_AWS_DEFAULT_REGION
+            - BITBUCKET_COMMIT_SHORT=$(echo "${BITBUCKET_COMMIT}" | cut -c 1-7)
+            - export REPOSITORY_NAME="${PRODUCTION_ECR}"
+            - NGINX_TAG="${REPOSITORY_NAME}:nginx-${BITBUCKET_COMMIT_SHORT}"
+            - PHP_TAG="${REPOSITORY_NAME}:php-${BITBUCKET_COMMIT_SHORT}"
+            - VAR_FILE="environment/production/terraform.tfvars"
+            - HCL_FILE="environment/production/backend.hcl"
+            - cd iac
+            - terraform init -backend-config $HCL_FILE
+            - terraform apply -auto-approve -var=nginx_image_tag=$NGINX_TAG -var=phpapp_image_tag=$PHP_TAG -var-file=$VAR_FILE
